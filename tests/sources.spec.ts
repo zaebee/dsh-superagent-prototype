@@ -511,6 +511,28 @@ describe('github source', () => {
     expect(bare(reads)).toEqual(['issues/7/comments'])
     h.store.close()
   })
+  it('does not poll a PR thread once every ticket that follows it has ended', async () => {
+    const h = host()
+    const day = 24 * 3600_000
+    h.store.threads.save({ key: 'github:9', ref: { source: 'github', id: '9' }, createdAt: '2026-09-01T00:00:00Z',
+      lastAt: new Date(Date.now() - 3 * day).toISOString(), subscriptions: ['t1'], correlated: [], pending: [],
+      meta: { number: 9, isPr: true, title: 'Fix the margin' } })
+    // The ticket that followed the PR merged three days ago, well inside the two-week horizon.
+    h.store.tickets.save({ ...openTicket('t1'),
+      ended: { at: new Date(Date.now() - 3 * day).toISOString(), by: 'executor', reason: 'merged', outcome: 'merged' } })
+    const reads = github(h, {})
+    await pollGithubThreads(h)
+    // A merged PR is not re-read every round: a later human comment arrives through the notification stream.
+    expect(bare(reads)).toEqual([])
+    // A live ticket keeps the same PR polled.
+    h.store.tickets.save({ ...openTicket('t2'), ...pulled(9) })
+    h.store.threads.save({ key: 'github:9', ref: { source: 'github', id: '9' }, createdAt: '2026-09-01T00:00:00Z',
+      lastAt: new Date(Date.now() - 3 * day).toISOString(), subscriptions: ['t1', 't2'], correlated: [], pending: [],
+      meta: { number: 9, isPr: true, title: 'Fix the margin' } })
+    await pollGithubThreads(h)
+    expect(bare(reads).filter(path => path.startsWith('pulls/9'))).not.toEqual([])
+    h.store.close()
+  })
   it('polls a subscribed Thread while a live ticket follows it or its last Trigger is under two weeks old', async () => {
     const h = host()
     const day = 24 * 3600_000
@@ -1025,6 +1047,11 @@ it('reports GitHub as failing only after the configured number of consecutive fa
   expect(pollFailure(3, 3, eof)).toEqual({ state: 'error', detail: '3 consecutive failed polls; last: Error: Get "https://api.github.com/x": EOF', code: 'pollFailures', values: { count: '3', error: 'Error: Get "https://api.github.com/x": EOF' } })
   expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3, observeIssues: false,
     observePulls: false, observeComments: false, observeCi: false })
+})
+it('reports a rate-limit poll failure loudly on the first hit, not after the threshold', () => {
+  const limited = commandError({ stderr: 'gh: API rate limit exceeded for user ID 199481349 (HTTP 403)', code: 1 })
+  expect(pollFailure(1, 3, limited)).toEqual({ state: 'error', detail: `GitHub rate limit exceeded: ${String(limited)}`, code: 'rateLimit',
+    values: { error: String(limited) } })
 })
 describe('feishu event consumer', () => {
   let dir: string

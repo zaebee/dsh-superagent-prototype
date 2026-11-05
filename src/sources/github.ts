@@ -1,6 +1,6 @@
 /** GitHub source kind definition, notification and repository polling loops, and Cordis plugin entry. */
 import type { Context } from '@deepseek-ai/cordis'
-import { key, type Thread } from '../core/index.ts'
+import { key, liveTicket, type Thread } from '../core/index.ts'
 import { sameName } from '../infra/text.ts'
 import { GithubAccountsSchema } from '../deployment.ts'
 import { CliError, validItems, type Tally } from '../infra/commands.ts'
@@ -120,8 +120,13 @@ export function apply(ctx: Context): void {
     return async () => { controller.abort(); await running }
   })
 }
-/** Returns an error health once `failures` consecutive polls fail, or undefined so a single network interruption stays quiet. */
+/** True when an error is GitHub's rate-limit response (HTTP 403 with a rate-limit message). */
+function rateLimited(error: unknown): boolean {
+  return error instanceof CliError && error.code === 403 && /rate limit/i.test(error.message)
+}
+/** True once `failures` consecutive polls fail, or when a poll hit the rate limit; the latter is loud on the first hit, not after three. */
 export function pollFailure(failures: number, threshold: number, error: unknown): Health | undefined {
+  if (rateLimited(error)) return health('error', 'rateLimit', { error: String(error) })
   return failures >= threshold ? health('error', 'pollFailures', { count: String(failures), error: String(error) }) : undefined
 }
 async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
@@ -138,6 +143,14 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
       failures = 0
     } catch (error) {
       failures += 1
+      // A rate-limit response is loud on the first hit and backs off a full interval instead of retrying into the ceiling;
+      // the failed round does not advance the notification cursor, so the mention is picked up after the bucket resets.
+      if (rateLimited(error)) {
+        ctx.report('github', health('error', 'rateLimit', { error: String(error) }))
+        failures = 0
+        await pause(Math.max(interval, config?.pollSeconds ?? 60) * 1000, signal)
+        continue
+      }
       const failed = pollFailure(failures, config?.failuresBeforeError ?? 1, error)
       if (!signal.aborted && failed) ctx.report('github', failed)
     }
@@ -442,6 +455,12 @@ async function pollThread(ctx: SourceContext, round: Round, thread: Thread): Pro
   if (thread.ref.id.startsWith('ci:')) return
   const number = Number(thread.ref.id)
   if (!number) throw new Error('Subscribed thread has no GitHub issue or PR number')
+  // An ended PR is not polled: a later human comment arrives through the notification stream (which reads the PR's
+  // comments once per notification, not per round), so re-reading a dormant PR every round — four unconditional requests
+  // (`pulls/N`, `issues/N/comments`, `pulls/N/comments`, `pulls/N/reviews`) — burns the account's rate limit for nothing.
+  // A subscription whose ticket record is missing is not proof of an end: only every resolved ticket being ended skips it.
+  const tickets = thread.subscriptions.map(id => ctx.tickets.get(id))
+  if (thread.meta.isPr === true && tickets.length && tickets.every(ticket => ticket !== undefined && !liveTicket(ticket))) return
   round.read.add(number)
   if (typeof thread.meta.isPr !== 'boolean' || typeof thread.meta.title !== 'string') {
     const issue = await ctx.commands.withSignal(round.signal).api(IssueSchema, `issues/${number}`)
