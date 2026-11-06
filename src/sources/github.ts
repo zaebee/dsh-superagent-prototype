@@ -60,7 +60,7 @@ export const githubKind: SourceKind<GithubConfig> = {
       hint: { zh: '打开后，默认分支的 CI 失败和恢复会收到，由策略的接收表决定是否成为候选。', en: 'Failures of the default branch\'s CI, and its recovery, are received, and the Policy\'s admission table decides whether they become candidates.' } },
     { key: 'labels', type: 'rows', label: { zh: '接收这些标签的 Issue/PR', en: 'Accept Issues/PRs with these labels' },
       hint: { zh: '从“接收仓库里的新 Issue/PR”流里，只接收带有其中任一标签、且没有 @ 智能体的 Issue/PR。留空则不过滤。@ 智能体的请求始终接收。', en: 'From the new-Issue/PR streams, only receive unaddressed Issues/PRs carrying one of these labels. Empty means no filter; a mention of the agent is always received.' },
-      columns: [{ key: 'label', type: 'text', label: { zh: '标签', en: 'Label' }, pattern: '[A-Za-z0-9_.\\-]+' }] }],
+      columns: [{ key: 'label', type: 'text', label: { zh: '标签', en: 'Label' }, pattern: '[A-Za-z0-9_.-]+' }] }],
   // What the Source observes across the repository it receives in full; elsewhere, only what addresses the agent.
   scope: ({ meta }, config) => {
     const row = scopeOf(meta)
