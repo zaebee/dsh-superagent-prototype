@@ -35,6 +35,7 @@ export type GithubComment = z.infer<typeof CommentSchema>
 export const IssueSchema = CommentSchema.extend({
   number: z.number(), title: z.string(), state: z.string(), created_at: z.string(), html_url: z.string(),
   pull_request: z.looseObject({ url: z.string() }).nullish(),
+  labels: z.array(z.looseObject({ name: z.string() })).nullish(),
 })
 export type GithubIssue = z.infer<typeof IssueSchema>
 type Opened = Pick<GithubIssue, 'number' | 'title' | 'body' | 'user' | 'created_at' | 'html_url'>

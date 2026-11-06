@@ -530,7 +530,7 @@ describe('github source', () => {
       lastAt: new Date(Date.now() - 3 * day).toISOString(), subscriptions: ['t1', 't2'], correlated: [], pending: [],
       meta: { number: 9, isPr: true, title: 'Fix the margin' } })
     await pollGithubThreads(h)
-    expect(bare(reads).filter(path => path.startsWith('pulls/9'))).not.toEqual([])
+    expect(bare(reads).filter(path => path?.startsWith('pulls/9'))).not.toEqual([])
     h.store.close()
   })
   it('polls a subscribed Thread while a live ticket follows it or its last Trigger is under two weeks old', async () => {
@@ -1046,7 +1046,7 @@ it('reports GitHub as failing only after the configured number of consecutive fa
   expect(pollFailure(2, 3, eof)).toBeUndefined()
   expect(pollFailure(3, 3, eof)).toEqual({ state: 'error', detail: '3 consecutive failed polls; last: Error: Get "https://api.github.com/x": EOF', code: 'pollFailures', values: { count: '3', error: 'Error: Get "https://api.github.com/x": EOF' } })
   expect(githubKind.schema.parse({})).toEqual({ repository: '', cli: '', pollSeconds: 60, failuresBeforeError: 3, observeIssues: false,
-    observePulls: false, observeComments: false, observeCi: false })
+    observePulls: false, observeComments: false, observeCi: false, labels: [{ label: 'ready-for-agent' }, { label: 'agent-ready' }] })
 })
 it('reports a rate-limit poll failure loudly on the first hit, not after the threshold', () => {
   const limited = commandError({ stderr: 'gh: API rate limit exceeded for user ID 199481349 (HTTP 403)', code: 1 })
@@ -1218,7 +1218,7 @@ describe('observing the GitHub repository', () => {
   const issue = (number: number, fields: Partial<GithubIssue> = {}): GithubIssue => ({ id: 1000 + number, number, title: `Issue ${number}`,
     body: 'details', state: 'open', created_at: at(0), updated_at: at(0),
     html_url: `https://github.com/acme/widgets/issues/${number}`, user: { login: 'carol', type: 'User' }, ...fields })
-  const observe = (h: ReturnType<typeof host>, config: Record<string, boolean>) =>
+  const observe = (h: ReturnType<typeof host>, config: Record<string, unknown>) =>
     h.store.saveSettings({ ...h.store.settings(), sources: { ...h.store.settings().sources, github: { enabled: true, config } } })
   /** GitHub as the repository's lists and its default branch answer; a request with the ETag of an unchanged list answers 304. */
   function repository(h: ReturnType<typeof host>, answers: { issues?: unknown[]; comments?: unknown[]; reviewComments?: unknown[];
@@ -1243,7 +1243,7 @@ describe('observing the GitHub repository', () => {
   it('takes in the new Issues and PRs from when it started observing them, and asks again with the ETag while nothing is newer',
     async () => {
     const h = host()
-    observe(h, { observeIssues: true, observePulls: true })
+    observe(h, { observeIssues: true, observePulls: true, labels: [] })
     h.store.set('github-since', at(-24))
     h.store.set('github-stream:issues', { since: at(0), started: { issues: at(0), pulls: at(0) } })
     const calls = repository(h, { issues: [issue(3, { created_at: at(-24), updated_at: at(1) }),
@@ -1291,6 +1291,35 @@ describe('observing the GitHub repository', () => {
     await pollRound(h)
     expect(h.receive.mock.calls.map(([trigger]) => [trigger.meta.number, trigger.meta.isPr, trigger.meta.kind, trigger.human]))
       .toEqual([[7, false, 'conversation', true], [9, true, 'conversation', false], [9, true, 'inline', true]])
+    h.store.close()
+  })
+  it('admits an observed Issue only with an admitting label, unless it mentions the agent', async () => {
+    const h = host()
+    h.store.saveSettings({ ...h.store.settings(), sources: { ...h.store.settings().sources,
+      github: { enabled: true, config: { observeIssues: true, labels: [{ label: 'ready-for-agent' }, { label: 'agent-ready' }] } } } })
+    h.store.set('github-since', at(-24))
+    h.store.set('github-stream:issues', { since: at(0), started: { issues: at(0) } })
+    const issues = [
+      issue(4, { labels: [{ name: 'ready-for-agent' }] }),
+      issue(5, { labels: [{ name: 'other' }] }),
+      issue(6), // no labels
+      issue(7, { body: '@agent-bot please take this', labels: [{ name: 'other' }] }),
+    ]
+    repository(h, { issues })
+    await pollRound(h)
+    // Only the labeled Issue and the mentioning Issue are ingested; the unlabeled ones are not.
+    expect(h.receive.mock.calls.map(([trigger]) => trigger.meta.number)).toEqual([4, 7])
+    h.store.close()
+  })
+  it('ingests every observed Issue when the label filter is empty', async () => {
+    const h = host()
+    h.store.saveSettings({ ...h.store.settings(), sources: { ...h.store.settings().sources,
+      github: { enabled: true, config: { observeIssues: true, labels: [] } } } })
+    h.store.set('github-since', at(-24))
+    h.store.set('github-stream:issues', { since: at(0), started: { issues: at(0) } })
+    repository(h, { issues: [issue(4), issue(5, { labels: [{ name: 'other' }] })] })
+    await pollRound(h)
+    expect(h.receive.mock.calls.map(([trigger]) => trigger.meta.number)).toEqual([4, 5])
     h.store.close()
   })
   it('fails the round for a stream whose read fails, keeps its cursor, and still reads the other streams', async () => {
@@ -1346,7 +1375,7 @@ describe('observing the GitHub repository', () => {
   })
   it('takes in new PRs only from when their switch turned on, apart from when new Issues were', async () => {
     const h = host()
-    observe(h, { observeIssues: true, observePulls: true })
+    observe(h, { observeIssues: true, observePulls: true, labels: [] })
     h.store.set('github-since', at(-24))
     // The stream took in Issues from hour 0; PRs were switched on only now.
     h.store.set('github-stream:issues', { since: at(0), started: { issues: at(0) } })

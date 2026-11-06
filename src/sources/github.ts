@@ -5,7 +5,7 @@ import { sameName } from '../infra/text.ts'
 import { GithubAccountsSchema } from '../deployment.ts'
 import { CliError, validItems, type Tally } from '../infra/commands.ts'
 import { ciCounts, ciFact, ciFailures, ciSummary, githubThreadContext, pullChecks } from './github-read.ts'
-import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, issueTrigger, IssueSchema, pullTrigger, SOURCE }
+import { branchCiTrigger, ciTrigger, commentTrigger, CommentSchema, githubAddress, issueTrigger, IssueSchema, mentions, pullTrigger, SOURCE }
   from './github-trigger.ts'
 import { githubLink, sendGithub } from './github-channel.ts'
 import type { GithubComment, PullRef } from './github-trigger.ts'
@@ -25,7 +25,10 @@ const NotificationSchema = z.looseObject({
 const GithubConfigSchema = GithubAccountsSchema.extend({ pollSeconds: z.number().int().min(60).max(3600).default(60),
   failuresBeforeError: z.number().int().min(1).max(20).default(3),
   observeIssues: z.boolean().default(false), observePulls: z.boolean().default(false), observeComments: z.boolean().default(false),
-  observeCi: z.boolean().default(false) }).strict()
+  observeCi: z.boolean().default(false),
+  // Issue/PR labels that admit an unaddressed (non-mention) Issue or PR from the observed streams; empty means the filter is off.
+  labels: z.array(z.object({ label: z.string().regex(/^[A-Za-z0-9_.-]+$/) }).strict())
+    .default([{ label: 'ready-for-agent' }, { label: 'agent-ready' }]) }).strict()
 export type GithubConfig = z.infer<typeof GithubConfigSchema>
 const OBSERVED = { issues: 'observeIssues', pulls: 'observePulls', comments: 'observeComments', ci: 'observeCi' } as const
 type Scope = keyof typeof OBSERVED
@@ -54,7 +57,10 @@ export const githubKind: SourceKind<GithubConfig> = {
     { key: 'observeComments', type: 'switch', label: { zh: '接收仓库里的评论', en: 'Receive comments in the repository' },
       hint: { zh: '打开后，Issue 和 PR 上没有 @ 智能体的评论和代码评论也会收到，由策略的接收表决定是否成为候选。', en: 'Comments and review comments on Issues and PRs that do not mention the agent are received too, and the Policy\'s admission table decides whether they become candidates.' } },
     { key: 'observeCi', type: 'switch', label: { zh: '接收默认分支的 CI', en: 'Receive the default branch\'s CI' },
-      hint: { zh: '打开后，默认分支的 CI 失败和恢复会收到，由策略的接收表决定是否成为候选。', en: 'Failures of the default branch\'s CI, and its recovery, are received, and the Policy\'s admission table decides whether they become candidates.' } }],
+      hint: { zh: '打开后，默认分支的 CI 失败和恢复会收到，由策略的接收表决定是否成为候选。', en: 'Failures of the default branch\'s CI, and its recovery, are received, and the Policy\'s admission table decides whether they become candidates.' } },
+    { key: 'labels', type: 'rows', label: { zh: '接收这些标签的 Issue/PR', en: 'Accept Issues/PRs with these labels' },
+      hint: { zh: '从“接收仓库里的新 Issue/PR”流里，只接收带有其中任一标签、且没有 @ 智能体的 Issue/PR。留空则不过滤。@ 智能体的请求始终接收。', en: 'From the new-Issue/PR streams, only receive unaddressed Issues/PRs carrying one of these labels. Empty means no filter; a mention of the agent is always received.' },
+      columns: [{ key: 'label', type: 'text', label: { zh: '标签', en: 'Label' }, pattern: '[A-Za-z0-9_.-]+' }] }],
   // What the Source observes across the repository it receives in full; elsewhere, only what addresses the agent.
   scope: ({ meta }, config) => {
     const row = scopeOf(meta)
@@ -181,7 +187,8 @@ function included(raw: string): { headers: string; body: string } {
   if (split < 0) throw new Error('GitHub returned no HTTP headers')
   return { headers: raw.slice(0, split), body: raw.slice(split).trim() }
 }
-const ListedSchema = CommentSchema.extend({ issue_url: z.string().nullish(), pull_request_url: z.string().nullish() })
+const ListedSchema = CommentSchema.extend({ issue_url: z.string().nullish(), pull_request_url: z.string().nullish(),
+  labels: z.array(z.looseObject({ name: z.string() })).nullish() })
 /** Repository-wide event streams; GitHub's `/issues` endpoint includes PRs, and `/issues/comments` covers issue and PR conversation comments (excluding inline review comments). */
 const STREAMS = [
   { id: 'issues', observed: (config: GithubConfig) => config.observeIssues || config.observePulls, path: 'issues?state=all' },
@@ -242,6 +249,12 @@ async function readStream(ctx: SourceContext, round: Round, id: string, path: st
       const issue = IssueSchema.safeParse(item)
       const pr = issue.success && !!issue.data.pull_request
       if (!issue.success || !fresh(issue.data.created_at, pr ? 'pulls' : 'issues')) continue
+      // With a label filter on, an Issue or PR that neither mentions the agent nor carries an admitting label is not ingested.
+      const wanted = config.labels.map(row => row.label)
+      if (wanted.length && !mentions(issue.data.body ?? '', login)) {
+        const names = new Set((issue.data.labels ?? []).map(label => label.name))
+        if (!wanted.some(label => names.has(label))) continue
+      }
       await ctx.receive(pr ? pullTrigger(issue.data, login) : issueTrigger(issue.data, login))
       nameThread(ctx, issue.data.number, issue.data.title)
       continue
